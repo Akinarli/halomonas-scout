@@ -1,0 +1,34 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.env
+venv/
+env/
+
+# Cache (local only)
+/backend/haloscout_cache/
+C:/tmp/haloscout_cache/
+
+# Node
+node_modules/
+frontend/node_modules/
+
+# React build (Vercel bunu kendisi build eder)
+frontend/build/
+
+# JSON (büyük dosya - ayrı repo'ya gidecek)
+backend/halomonas_genes.json
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
