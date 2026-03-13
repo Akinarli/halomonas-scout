@@ -10,7 +10,7 @@ import re, json, gzip, requests, urllib.parse, time, os, hashlib, pickle, thread
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
 
 app = Flask(__name__)
-CORS(app)
+CORS(app, origins=["*"], supports_credentials=False)
 
 # ─── GENES DATABASE ───────────────────────────────────────────────────────────
 _GENES_DB = None
