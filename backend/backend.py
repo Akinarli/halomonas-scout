@@ -545,19 +545,9 @@ def health():
 
 @app.route("/count", methods=["GET"])
 def count_assemblies():
-    """Kaç tane Halomonas sp. assembly var NCBI'da?"""
-    try:
-        es = requests.get(f"{NCBI_EUTILS}/esearch.fcgi", params={
-            "db": "assembly",
-            "term": '"Halomonas sp."[Organism]',
-            "retmode": "json",
-            "retmax": 0,
-        }, headers=HEADERS, timeout=(10, 20))
-        es.raise_for_status()
-        count = int(es.json().get("esearchresult", {}).get("count", 0))
-        return jsonify({"count": count})
-    except Exception as e:
-        return jsonify({"error": str(e)}), 502
+    """TSV'deki assembly sayısını döndür."""
+    assemblies = load_assemblies_from_tsv()
+    return jsonify({"count": len(assemblies)})
 
 
 @app.route("/scan", methods=["GET"])
