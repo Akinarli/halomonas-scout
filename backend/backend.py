@@ -12,6 +12,34 @@ from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeou
 app = Flask(__name__)
 CORS(app)
 
+# ─── GENES DATABASE ───────────────────────────────────────────────────────────
+_GENES_DB = None
+
+def load_genes_db() -> dict | None:
+    """halomonas_genes.json.gz dosyasını yükle (lazy, bir kere)."""
+    global _GENES_DB
+    if _GENES_DB is not None:
+        return _GENES_DB
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    gz_path  = os.path.join(script_dir, "halomonas_genes.json.gz")
+    json_path = os.path.join(script_dir, "halomonas_genes.json")
+    try:
+        if os.path.exists(gz_path):
+            print(f"[GENES_DB] {gz_path} yükleniyor...")
+            with gzip.open(gz_path, "rt", encoding="utf-8") as f:
+                _GENES_DB = json.load(f)
+            print(f"[GENES_DB] {len(_GENES_DB.get('assemblies', {}))} assembly yüklendi")
+            return _GENES_DB
+        elif os.path.exists(json_path):
+            print(f"[GENES_DB] {json_path} yükleniyor...")
+            with open(json_path, "r", encoding="utf-8") as f:
+                _GENES_DB = json.load(f)
+            print(f"[GENES_DB] {len(_GENES_DB.get('assemblies', {}))} assembly yüklendi")
+            return _GENES_DB
+    except Exception as e:
+        print(f"[GENES_DB] Yükleme hatası: {e}")
+    return None
+
 # ─── CACHE ────────────────────────────────────────────────────────────────────
 CACHE_DIR = os.environ.get("CACHE_DIR", "/tmp/haloscout_cache")
 os.makedirs(CACHE_DIR, exist_ok=True)
@@ -572,92 +600,110 @@ def scan():
     product_queries = [p.strip() for p in product_raw.split(",") if p.strip()]
 
     def generate():
-        yield sse({"type": "status", "message": f"NCBI'dan Halomonas sp. assembly listesi alınıyor (tümü)..."})
+        db = load_genes_db()
 
-        assemblies = search_halomonas_sp_assemblies(extra_term=extra_filter, retmax=retmax)
+        # ── JSON DB varsa: anlık tarama ──────────────────────────────────────
+        if db:
+            assemblies_db = db.get("assemblies", {})
+            total = len(assemblies_db)
+            yield sse({"type": "status", "message": f"JSON veritabanından {total} assembly taranıyor..."})
+            yield sse({"type": "assembly_list", "total_in_ncbi": total, "to_scan": total,
+                       "message": f"{total} assembly JSON'dan taranıyor."})
 
-        if not assemblies:
-            yield sse({"type": "error", "message": "NCBI'dan assembly listesi alınamadı."})
+            found_count = 0
+            items = list(assemblies_db.items())
+            for idx, (accession, asm_data) in enumerate(items):
+                strain_name = asm_data.get("strain", accession)
+                genes = asm_data.get("genes", [])
+
+                yield sse({"type": "scanning", "accession": accession, "strain": strain_name,
+                           "progress": idx + 1, "total": total})
+
+                # JSON'daki genlerden eşleşenleri bul
+                matches = []
+                query_go_ids = {q: get_go_ids_for_query(q) for q in product_queries}
+                for gene in genes:
+                    product  = gene.get("product", "")
+                    go       = gene.get("go", "")
+                    combined = f"{product} {go}".lower()
+                    matched  = []
+                    for q in product_queries:
+                        ql = q.lower()
+                        if ql in combined:
+                            matched.append(q)
+                        elif any(gid.lower() in go.lower() for gid in query_go_ids.get(ql, [])):
+                            matched.append(q)
+                    if matched:
+                        matches.append({**gene, "matched_query": matched[0],
+                                        "match_field": "product" if matched[0].lower() in product.lower() else "GO/note"})
+
+                if not matches:
+                    yield sse({"type": "not_found", "accession": accession, "strain": strain_name,
+                               "progress": idx + 1, "total": total})
+                    continue
+
+                found_count += 1
+                yield sse({
+                    "type": "found", "accession": accession, "strain": strain_name,
+                    "biosample": asm_data.get("biosample", ""), "taxid": asm_data.get("taxid", ""),
+                    "source": "JSON DB", "match_count": len(matches), "results": matches,
+                    "ncbi_url": f"https://www.ncbi.nlm.nih.gov/datasets/genome/{accession}/",
+                    "progress": idx + 1, "total": total,
+                })
+
+            yield sse({"type": "done", "total_scanned": total, "found_count": found_count,
+                       "skip_count": 0, "message": f"Tamamlandı: {total} strain, {found_count} pozitif."})
             return
 
-        total_count = assemblies[0].get("total_count", len(assemblies)) if assemblies else 0
-        yield sse({
-            "type": "assembly_list",
-            "total_in_ncbi": total_count,
-            "to_scan": len(assemblies),
-            "message": f"NCBI'da toplam {total_count} Halomonas sp. assembly var. {len(assemblies)} tanesi taranacak."
-        })
+        # ── JSON DB yoksa: NCBI'dan canlı tara (fallback) ───────────────────
+        yield sse({"type": "status", "message": f"JSON DB bulunamadı, NCBI'dan taranıyor..."})
+        assemblies = load_assemblies_from_tsv()
+        if not assemblies:
+            yield sse({"type": "error", "message": "Assembly listesi alınamadı."})
+            return
 
+        total = len(assemblies)
+        yield sse({"type": "assembly_list", "total_in_ncbi": total, "to_scan": total,
+                   "message": f"{total} assembly taranacak."})
         found_count = 0
         skip_count  = 0
 
         for idx, asm in enumerate(assemblies):
-            accession  = asm["accession"]
+            accession   = asm["accession"]
             strain_name = asm["strain_name"]
-            assembly_name = asm.get("assembly_name", "")
+            yield sse({"type": "scanning", "accession": accession, "strain": strain_name,
+                       "progress": idx + 1, "total": total})
 
-            yield sse({
-                "type":      "scanning",
-                "accession": accession,
-                "strain":    strain_name,
-                "assembly":  assembly_name,
-                "progress":  idx + 1,
-                "total":     len(assemblies),
-            })
-
-            content, source = download_annotation(
+            ann_content, source = download_annotation(
                 accession,
                 ftp_refseq=asm.get("ftp_refseq", ""),
                 ftp_genbank=asm.get("ftp_genbank", ""),
             )
 
-            if content is None:
+            if ann_content is None:
                 skip_count += 1
-                yield sse({
-                    "type":      "skip",
-                    "accession": accession,
-                    "strain":    strain_name,
-                    "reason":    "Annotation indirilemedi",
-                    "progress":  idx + 1,
-                    "total":     len(assemblies),
-                })
+                yield sse({"type": "skip", "accession": accession, "strain": strain_name,
+                           "reason": "Annotation indirilemedi", "progress": idx + 1, "total": total})
                 continue
 
-            matches = parse_annotation(content, product_queries)
-
+            matches = parse_annotation(ann_content, product_queries)
             if not matches:
-                yield sse({
-                    "type":      "not_found",
-                    "accession": accession,
-                    "strain":    strain_name,
-                    "progress":  idx + 1,
-                    "total":     len(assemblies),
-                })
+                yield sse({"type": "not_found", "accession": accession, "strain": strain_name,
+                           "progress": idx + 1, "total": total})
                 continue
 
             found_count += 1
             yield sse({
-                "type":         "found",
-                "accession":    accession,
-                "strain":       strain_name,
-                "assembly":     assembly_name,
-                "biosample":    asm.get("biosample", ""),
-                "taxid":        asm.get("taxid", ""),
-                "source":       source,
-                "match_count":  len(matches),
-                "results":      matches,
-                "ncbi_url":     f"https://www.ncbi.nlm.nih.gov/datasets/genome/{accession}/",
-                "progress":     idx + 1,
-                "total":        len(assemblies),
+                "type": "found", "accession": accession, "strain": strain_name,
+                "biosample": asm.get("biosample", ""), "taxid": asm.get("taxid", ""),
+                "source": source, "match_count": len(matches), "results": matches,
+                "ncbi_url": f"https://www.ncbi.nlm.nih.gov/datasets/genome/{accession}/",
+                "progress": idx + 1, "total": total,
             })
 
-        yield sse({
-            "type":          "done",
-            "total_scanned": len(assemblies),
-            "found_count":   found_count,
-            "skip_count":    skip_count,
-            "message":       f"Tamamlandı: {len(assemblies)} strain tarandı, {found_count} pozitif, {skip_count} atlandı.",
-        })
+        yield sse({"type": "done", "total_scanned": total, "found_count": found_count,
+                   "skip_count": skip_count,
+                   "message": f"Tamamlandı: {total} strain tarandı, {found_count} pozitif."})
 
     return Response(
         stream_with_context(generate()),
