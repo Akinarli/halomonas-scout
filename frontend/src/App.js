@@ -664,7 +664,7 @@ export default function App() {
           <div style={{display:"flex",alignItems:"center",gap:16}}>
             <span className="header-pill">
               <span className="header-pill-dot"/>
-              {ncbiCount !== null ? ncbiCount : 467} assembly
+              {ncbiCount !== null ? ncbiCount : 466} assembly
             </span>
             <span style={{fontFamily:"'Space Mono',monospace",fontSize:11,color:T.textDim}}>v1.0.0</span>
           </div>
@@ -675,7 +675,7 @@ export default function App() {
           <div className="hero">
             <p className="hero-eyebrow">Halomonas sp. · Uncharacterized isolates · NCBI</p>
             <h1 className="hero-title">Gen tara,<br/><span>hızla bul.</span></h1>
-            <p className="hero-desc">467 tanımlanmamış Halomonas sp. izolatının tüm genomlarında gen ve enzim taraması. NCBI GBFF tabanlı, GO annotation dahil.</p>
+            <p className="hero-desc">466 tanımlanmamış Halomonas sp. izolatının tüm genomlarında gen ve enzim taraması. NCBI GBFF tabanlı, GO annotation dahil.</p>
 
             {/* Search */}
             <div className="search-outer">
@@ -729,7 +729,7 @@ export default function App() {
           {(scanning || results.length > 0) && (
             <div className="stats-bar">
               <div className="stat">
-                <span className="stat-num">{progress.total || 467}</span>
+                <span className="stat-num">{progress.total || 466}</span>
                 <span className="stat-label">Assembly</span>
               </div>
               <div className="stat">

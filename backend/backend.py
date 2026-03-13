@@ -628,7 +628,7 @@ def scan():
 
         # ── CHUNK modu: RAM dostu, parça parça oku ───────────────────────────
         if chunks:
-            total = 467  # TSV'den bilinen toplam
+            total = 466  # TSV'den bilinen toplam
             query_go_ids = {q: get_go_ids_for_query(q) for q in product_queries}
             yield sse({"type": "status", "message": f"{len(chunks)} chunk dosyasından {total} assembly taranıyor..."})
             yield sse({"type": "assembly_list", "total_in_ncbi": total, "to_scan": total,
