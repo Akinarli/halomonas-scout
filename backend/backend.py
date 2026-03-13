@@ -12,33 +12,57 @@ from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeou
 app = Flask(__name__)
 CORS(app, origins=["*"], supports_credentials=False)
 
-# ─── GENES DATABASE ───────────────────────────────────────────────────────────
-_GENES_DB = None
+# ─── GENES DATABASE (chunk tabanlı) ──────────────────────────────────────────
+_CHUNKS_AVAILABLE = None  # chunk dosyalarının listesi
+
+def get_chunk_files() -> list[str]:
+    """Mevcut chunk dosyalarını bul."""
+    global _CHUNKS_AVAILABLE
+    if _CHUNKS_AVAILABLE is not None:
+        return _CHUNKS_AVAILABLE
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    chunks = []
+    for i in range(20):
+        p = os.path.join(script_dir, f"chunk_{i}.json.gz")
+        if os.path.exists(p):
+            chunks.append(p)
+        else:
+            break
+    _CHUNKS_AVAILABLE = chunks
+    print(f"[GENES_DB] {len(chunks)} chunk bulundu")
+    return chunks
 
 def load_genes_db() -> dict | None:
-    """halomonas_genes.json.gz dosyasını yükle (lazy, bir kere)."""
-    global _GENES_DB
-    if _GENES_DB is not None:
-        return _GENES_DB
+    """Geriye dönük uyumluluk için — chunk varsa None döner, scan kendi iter."""
     script_dir = os.path.dirname(os.path.abspath(__file__))
-    gz_path  = os.path.join(script_dir, "halomonas_genes.json.gz")
-    json_path = os.path.join(script_dir, "halomonas_genes.json")
-    try:
-        if os.path.exists(gz_path):
-            print(f"[GENES_DB] {gz_path} yükleniyor...")
+    # Chunk varsa None döndür (scan direkt chunk'ları iter eder)
+    if get_chunk_files():
+        return True  # chunk modu aktif sinyali
+    # Fallback: tek gz
+    gz_path = os.path.join(script_dir, "halomonas_genes.json.gz")
+    if os.path.exists(gz_path):
+        try:
+            print(f"[GENES_DB] {gz_path} yükleniyor (tek gz)...")
             with gzip.open(gz_path, "rt", encoding="utf-8") as f:
-                _GENES_DB = json.load(f)
-            print(f"[GENES_DB] {len(_GENES_DB.get('assemblies', {}))} assembly yüklendi")
-            return _GENES_DB
-        elif os.path.exists(json_path):
-            print(f"[GENES_DB] {json_path} yükleniyor...")
-            with open(json_path, "r", encoding="utf-8") as f:
-                _GENES_DB = json.load(f)
-            print(f"[GENES_DB] {len(_GENES_DB.get('assemblies', {}))} assembly yüklendi")
-            return _GENES_DB
-    except Exception as e:
-        print(f"[GENES_DB] Yükleme hatası: {e}")
+                db = json.load(f)
+            print(f"[GENES_DB] {len(db.get('assemblies', {}))} assembly yüklendi")
+            return db
+        except Exception as e:
+            print(f"[GENES_DB] Yükleme hatası: {e}")
     return None
+
+def iter_all_assemblies():
+    """Tüm assembly'leri chunk'lardan sırayla yield et — RAM dostu."""
+    chunks = get_chunk_files()
+    for chunk_path in chunks:
+        try:
+            with gzip.open(chunk_path, "rt", encoding="utf-8") as f:
+                data = json.load(f)
+            for acc, asm in data.get("assemblies", {}).items():
+                yield acc, asm
+        except Exception as e:
+            print(f"[GENES_DB] Chunk hatası {chunk_path}: {e}")
+            continue
 
 # ─── CACHE ────────────────────────────────────────────────────────────────────
 CACHE_DIR = os.environ.get("CACHE_DIR", "/tmp/haloscout_cache")
@@ -600,33 +624,32 @@ def scan():
     product_queries = [p.strip() for p in product_raw.split(",") if p.strip()]
 
     def generate():
-        db = load_genes_db()
+        chunks = get_chunk_files()
 
-        # ── JSON DB varsa: anlık tarama ──────────────────────────────────────
-        if db:
-            assemblies_db = db.get("assemblies", {})
-            total = len(assemblies_db)
-            yield sse({"type": "status", "message": f"JSON veritabanından {total} assembly taranıyor..."})
+        # ── CHUNK modu: RAM dostu, parça parça oku ───────────────────────────
+        if chunks:
+            total = 467  # TSV'den bilinen toplam
+            query_go_ids = {q: get_go_ids_for_query(q) for q in product_queries}
+            yield sse({"type": "status", "message": f"{len(chunks)} chunk dosyasından {total} assembly taranıyor..."})
             yield sse({"type": "assembly_list", "total_in_ncbi": total, "to_scan": total,
-                       "message": f"{total} assembly JSON'dan taranıyor."})
+                       "message": f"{total} assembly chunk DB'den taranıyor."})
 
             found_count = 0
-            items = list(assemblies_db.items())
-            for idx, (accession, asm_data) in enumerate(items):
+            idx = 0
+            for accession, asm_data in iter_all_assemblies():
                 strain_name = asm_data.get("strain", accession)
                 genes = asm_data.get("genes", [])
+                idx += 1
 
                 yield sse({"type": "scanning", "accession": accession, "strain": strain_name,
-                           "progress": idx + 1, "total": total})
+                           "progress": idx, "total": total})
 
-                # JSON'daki genlerden eşleşenleri bul
                 matches = []
-                query_go_ids = {q: get_go_ids_for_query(q) for q in product_queries}
                 for gene in genes:
-                    product  = gene.get("product", "")
-                    go       = gene.get("go", "")
-                    combined = f"{product} {go}".lower()
-                    matched  = []
+                    prod  = gene.get("product", "")
+                    go    = gene.get("go", "")
+                    combined = f"{prod} {go}".lower()
+                    matched = []
                     for q in product_queries:
                         ql = q.lower()
                         if ql in combined:
@@ -635,28 +658,28 @@ def scan():
                             matched.append(q)
                     if matched:
                         matches.append({**gene, "matched_query": matched[0],
-                                        "match_field": "product" if matched[0].lower() in product.lower() else "GO/note"})
+                                        "match_field": "product" if matched[0].lower() in prod.lower() else "GO/note"})
 
                 if not matches:
                     yield sse({"type": "not_found", "accession": accession, "strain": strain_name,
-                               "progress": idx + 1, "total": total})
+                               "progress": idx, "total": total})
                     continue
 
                 found_count += 1
                 yield sse({
                     "type": "found", "accession": accession, "strain": strain_name,
                     "biosample": asm_data.get("biosample", ""), "taxid": asm_data.get("taxid", ""),
-                    "source": "JSON DB", "match_count": len(matches), "results": matches,
+                    "source": "Chunk DB", "match_count": len(matches), "results": matches,
                     "ncbi_url": f"https://www.ncbi.nlm.nih.gov/datasets/genome/{accession}/",
-                    "progress": idx + 1, "total": total,
+                    "progress": idx, "total": total,
                 })
 
-            yield sse({"type": "done", "total_scanned": total, "found_count": found_count,
-                       "skip_count": 0, "message": f"Tamamlandı: {total} strain, {found_count} pozitif."})
+            yield sse({"type": "done", "total_scanned": idx, "found_count": found_count,
+                       "skip_count": 0, "message": f"Tamamlandı: {idx} strain, {found_count} pozitif."})
             return
 
-        # ── JSON DB yoksa: NCBI'dan canlı tara (fallback) ───────────────────
-        yield sse({"type": "status", "message": f"JSON DB bulunamadı, NCBI'dan taranıyor..."})
+        # ── Fallback: NCBI'dan canlı tara ────────────────────────────────────
+        yield sse({"type": "status", "message": "Chunk DB bulunamadı, NCBI'dan taranıyor..."})
         assemblies = load_assemblies_from_tsv()
         if not assemblies:
             yield sse({"type": "error", "message": "Assembly listesi alınamadı."})
